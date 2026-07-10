@@ -2,11 +2,9 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
-  // CORS ve JSON yanıt başlıkları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  // Türkçe finansal sayıları standart float formatına (7277.90) getiren temizlik fonksiyonu
   const parseFinansSayi = (str) => {
     if (!str) return 0;
     let temiz = str.toString().replace(/[^0-9.,-]/g, '').trim();
@@ -18,29 +16,12 @@ module.exports = async (req, res) => {
     return parseFloat(temiz) || 0;
   };
 
-  // Next.js veri ağacında TLY fonuna ait nesneyi derinlemesine arayan fonksiyon
-  const findFundRecursively = (obj, targetCode) => {
-    if (!obj || typeof obj !== 'object') return null;
-    if (obj.code === targetCode || obj.kod === targetCode || obj.fund_code === targetCode) {
-      return obj;
-    }
-    for (const key in obj) {
-      if (Object.prototype.hasOwnProperty.call(obj, key)) {
-        const result = findFundRecursively(obj[key], targetCode);
-        if (result) return result;
-      }
-    }
-    return null;
-  };
-
   let birimFiyat = 0;
-  let fonBuyuklugu = 0;
-  let toplamPay = 0;
   let direktNetAkis = 0;
 
   try {
     // =================================================================
-    // 1. ADIM: TERA PORTFÖY'DEN BİRİM FİYATI ÇEKME
+    // 1. ADIM: TERA PORTFÖY (FİYAT MOTORU - DOKUNULMADI)
     // =================================================================
     const teraUrl = 'https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly';
     const teraResponse = await axios.get(teraUrl, {
@@ -60,7 +41,7 @@ module.exports = async (req, res) => {
     }
 
     // =================================================================
-    // 2. ADIM: FINTABLES'TAN GİRİŞ/ÇIKIŞ VE DETAYLARI ÇEKME
+    // 2. ADIM: FINTABLES (YENİ ZEKİ NAKİT AKIŞ TARAYICISI)
     // =================================================================
     const fintablesUrl = 'https://fintables.com/fonlar/nakit-giris-cikisi';
     const fintablesResponse = await axios.get(fintablesUrl, {
@@ -77,44 +58,65 @@ module.exports = async (req, res) => {
       
       if (nextDataHtml) {
         const nextData = JSON.parse(nextDataHtml);
-        const tlyTabloObjesi = findFundRecursively(nextData, 'TLY');
-
-        if (tlyTabloObjesi) {
-          // Eğer Tera Portföy sitesi anlık çökerse fiyata yedek olarak Fintables değerini ata
-          if (birimFiyat === 0) {
-            birimFiyat = parseFinansSayi(tlyTabloObjesi.price || tlyTabloObjesi.fiyat || 0);
+        
+        // TLY'yi ve bulunduğu üst klasörü (parent) bulacak tarayıcı
+        let tlyRow = null;
+        const searchNode = (node, parent) => {
+          if (!node || typeof node !== 'object') return;
+          if (node.code === 'TLY' || node.kod === 'TLY' || node.fund_code === 'TLY') {
+            tlyRow = { current: node, parent: parent };
+            return;
           }
+          for (const key in node) {
+            if (tlyRow) return;
+            searchNode(node[key], node);
+          }
+        };
+        
+        searchNode(nextData, null);
+
+        if (tlyRow) {
+          const obj = tlyRow.parent || {};
+          const cur = tlyRow.current || {};
           
-          // Fintables Next.js veri alanındaki olası anahtar eşleşmeleri
-          fonBuyuklugu = parseFinansSayi(tlyTabloObjesi.market_cap || tlyTabloObjesi.total_value || tlyTabloObjesi.fon_toplam_buyukluk_tl || 0);
-          toplamPay = parseFinansSayi(tlyTabloObjesi.total_shares || tlyTabloObjesi.shares || tlyTabloObjesi.toplam_pay_sayisi || 0);
-          direktNetAkis = parseFinansSayi(tlyTabloObjesi.net_flow || tlyTabloObjesi.flow || tlyTabloObjesi.net_giris_cikislari || tlyTabloObjesi.amount || 0);
+          // Net akış verisini "parent" (ebeveyn) klasörden bulan esnek fonksiyon
+          const extractFlow = (targetObj) => {
+            if (!targetObj) return 0;
+            const priorityKeys = ['daily_flow', 'net_flow', 'flow', 'net_giris_cikis', 'diff'];
+            for (const pk of priorityKeys) {
+               for (const key in targetObj) {
+                  if (key.toLowerCase().includes(pk) && key.toLowerCase() !== 'total_value') {
+                     const val = targetObj[key];
+                     if (typeof val === 'number') return val;
+                     if (typeof val === 'string' && val.match(/[0-9]/)) return parseFinansSayi(val);
+                  }
+               }
+            }
+            return 0;
+          };
+
+          // TLY kodunu bulduğumuz klasörün hem içine hem de bir üstüne bak
+          direktNetAkis = extractFlow(obj) || extractFlow(cur) || 0;
         }
       }
     }
 
-    // Her iki hattan da fiyat saptanamazsa güvenli hata mesajı fırlat
     if (birimFiyat === 0) {
-      return res.status(200).json({
-        hata: "Tera Portföy ve Fintables kaynaklarından birim fiyat saptanamadı."
-      });
+      return res.status(200).json({ hata: "Tera Portföy fiyatı saptanamadı." });
     }
 
     const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-    // ESP32 terminaline iletilecek konsolide veri paketi
     res.status(200).json({
       fon: "TLY",
       fiyat: birimFiyat,
-      fon_toplam_buyukluk_tl: fonBuyuklugu,
-      toplam_pay_sayisi: Math.round(toplamPay),
-      direkt_net_nakit_akisi: direktNetAkis, // Fintables tablosundaki net giriş/çıkış miktarı (TL)
+      direkt_net_nakit_akisi: direktNetAkis,
       tarih: tarihStr
     });
 
   } catch (error) {
     res.status(200).json({
-      hata: "Hibrit veri hatları birleştirilirken hata oluştu.",
+      hata: "Veri isleme sirasinda hata olustu.",
       detay: error.message
     });
   }

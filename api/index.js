@@ -11,7 +11,7 @@ module.exports = async (req, res) => {
   try {
     const response = await axios.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
       timeout: 7000
     });
@@ -19,69 +19,59 @@ module.exports = async (req, res) => {
     const html = response.data;
     const $ = cheerio.load(html);
 
-    let fiyatText = '';
-    let eslesmeKaynagi = '';
+    // --- KRİTİK ADIM: ARKA PLAN KODLARINI KAZI ---
+    // JavaScript, CSS ve meta ayarlarını silerek false-positive (2048 gibi) tuzakları engelliyoruz
+    $('script, style, noscript, iframe, svg, meta').remove();
 
-    // 1. Kademe: Doğrudan Mynet'in ana fiyat sınıflarını hedef alıyoruz
+    // Sadece ekranda görünen temiz metni al
+    const temizGorselMetin = $('body').text().replace(/\s+/g, ' ');
+
+    let fiyatText = '';
+    let bulmaYontemi = '';
+
+    // 1. Kademe: Doğrudan Mynet'in sınıflarını kontrol et (Temizlenmiş DOM'da)
     if ($('.fn-fiyat').length > 0) {
       fiyatText = $('.fn-fiyat').first().text().trim();
-      eslesmeKaynagi = "DOM_Class_fn-fiyat";
-    } else if ($('.seans-fiyat').length > 0) {
-      fiyatText = $('.seans-fiyat').first().text().trim();
-      eslesmeKaynagi = "DOM_Class_seans-fiyat";
-    }
+      bulmaYontemi = "DOM_fn-fiyat";
+    } 
 
-    // 2. Kademe (Fallback): Sınıflar boşsa, HTML içindeki "Son Fiyat" tablosunu Regex ile tara
-    if (!fiyatText) {
-      const regexMatch = html.match(/(?:Fiyat|Son Fiyat)[\s\S]*?>\s*([0-9.,]+)\s*</i);
-      if (regexMatch) {
-        fiyatText = regexMatch[1].trim();
-        eslesmeKaynagi = "Regex_Son_Fiyat";
+    // 2. Kademe (Strict Fallback): Eğer sınıf boşsa, sadece fon fiyatı formatına uyan 
+    // (Örn: 3,4567 veya 12,345678 gibi virgülden sonra 4-6 hanesi olan) sayıları ara
+    if (!fiyatText || fiyatText.trim() === '') {
+      // RegEx Açıklaması: \d+ (en az bir sayı), virgül, \d{4,6} (en az 4 en fazla 6 basamak küsurat)
+      const strictRegex = temizGorselMetin.match(/\b(\d+,\d{4,6})\b/);
+      if (strictRegex) {
+        fiyatText = strictRegex[1].trim();
+        bulmaYontemi = "Strict_Fond_Regex";
       }
     }
 
-    // Ayıklanan metni ham haliyle saklayalım (Debugger için)
-    const hamMetin = fiyatText;
-
     if (!fiyatText) {
-      return res.status(404).json({ hata: "Sayfada fiyata dair hicbir metin bulunamadi." });
+      return res.status(404).json({ 
+        hata: "Temizlenmis metin icinde geçerli bir fon fiyatı formatı saptanamadı.",
+        IncelenenMetinOzeti: temizGorselMetin.substring(0, 300)
+      });
     }
 
-    // --- AKILLI SAYI FORMATLAMA ALGORİTMASI ---
-    // Eğer veride hem nokta hem virgül varsa (Örn: 2.048,15 -> İki bin kırk sekiz nokta on beş)
-    // Noktayı (binlik ayırıcıyı) sil, virgülü noktaya çevir.
-    let temizFiyat = fiyatText;
-    if (temizFiyat.includes(',') && temizFiyat.includes('.')) {
-      temizFiyat = temizFiyat.replace(/\./g, '').replace(',', '.');
-    } 
-    // Eğer sadece virgül varsa (Örn: 3,4567 -> Üç nokta kırk beş altmış yedi)
-    // Virgülü direkt noktaya çevir.
-    else if (temizFiyat.includes(',')) {
-      temizFiyat = temizFiyat.replace(',', '.');
-    }
-    // Eğer sadece nokta varsa (Örn: 2.048) binlik mi yoksa ondalık mı ayırt etmek zor.
-    // Ancak fon fiyatları küsuratlı olduğu için bunu direkt ondalık (float) kabul ediyoruz, dokunmuyoruz.
-
-    const fiyatFloat = parseFloat(temizFiyat);
+    // "3,456789" formatını ESP32 için "3.456789" float haline getir
+    let noktaFormatli = fiyatText.replace(',', '.');
+    const fiyatFloat = parseFloat(noktaFormatli);
 
     const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-    // ESP32'nin kafası karışmasın ama biz tarayıcıdan bakınca her şeyi görelim diye genişletilmiş çıktı:
     res.status(200).json({
       fon: fonKodu,
       fiyat: fiyatFloat,
       tarih: tarihStr,
-      // Hata ayıklama (Debug) parametreleri:
       debug: {
-        yakalananHamMetin: hamMetin,
-        formatlanmisMetin: temizFiyat,
-        verininAlindigiYer: eslesmeKaynagi
+        ayiklananMetin: fiyatText,
+        yontem: bulmaYontemi
       }
     });
 
   } catch (error) {
     res.status(500).json({ 
-      hata: "Ağ veya sunucu hatası oluştu.",
+      hata: "Ağ veya kaynak sunucu hatası.",
       detay: error.message 
     });
   }

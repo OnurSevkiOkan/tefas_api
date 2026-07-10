@@ -5,7 +5,7 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  // Kullanıcının belirttiği resmi Mynet Hisse senedi URL'sini doğrudan hedefliyoruz
+  // Doğrudan hedeflediğimiz Mynet sayfası
   const url = `https://finans.mynet.com/borsa/hisseler/tera-tera-yatirim-menkul-degerler/`;
 
   try {
@@ -19,61 +19,50 @@ module.exports = async (req, res) => {
     const html = response.data;
     const $ = cheerio.load(html);
 
-    // False-positive (yanlış eşleşme) ihtimalini sıfırlamak için arkada çalışan kod etiketlerini temizle
-    $('script, style, noscript, iframe, svg, meta').remove();
+    // Ekranda paylaştığın DevTools görselindeki tam sınıf (class) yolunu hedef alıyoruz
+    let hamFiyat = $('.finance-heading-new-bar .unit-price .data-value').text().trim();
 
-    // Sayfa içindeki tüm görünür temiz metni al
-    const temizGorselMetin = $('body').text().replace(/\s+/g, ' ');
-
-    let fiyatText = '';
-    let bulmaYontemi = '';
-
-    // 1. Kademe: Mynet hisse sayfalarındaki standart fiyat sınıflarını tara
-    if ($('.fn-fiyat').length > 0) {
-      fiyatText = $('.fn-fiyat').first().text().trim();
-      bulmaYontemi = "DOM_fn-fiyat";
-    } else if ($('.seans-fiyat').length > 0) {
-      fiyatText = $('.seans-fiyat').first().text().trim();
-      bulmaYontemi = "DOM_seans-fiyat";
+    // Alternatif Fallback: Eğer üst klasör ismi esnerse sadece alt kırılımları dene
+    if (!hamFiyat) {
+      hamFiyat = $('.unit-price .data-value').text().trim();
     }
 
-    // 2. Kademe (Katı Fallback): Eğer DOM sınıfları değiştiyse, Regex filtresini devreye sok.
-    // Bu kez \d{2,6} yaparak hisse senetlerinin 2 basamaklı (156,50) yapısını da kapsama alanına alıyoruz!
-    if (!fiyatText || fiyatText.trim() === '') {
-      const strictRegex = temizGorselMetin.match(/\b(\d+,\d{2,6})\b/);
-      if (strictRegex) {
-        fiyatText = strictRegex[1].trim();
-        bulmaYontemi = "Strict_Asset_Regex";
-      }
-    }
-
-    if (!fiyatText) {
+    if (!hamFiyat) {
       return res.status(404).json({ 
-        hata: "Belirtilen Mynet hisse sayfasında fiyat formatı saptanamadı.",
-        metinOzeti: temizGorselMetin.substring(0, 300)
+        hata: "Görseldeki '.finance-heading-new-bar .unit-price .data-value' seçicisi altında veri bulunamadı." 
       });
     }
 
-    // "156,50" formatını ESP32'nin okuyacağı "156.50" float tipine dönüştür
-    let noktaFormatli = fiyatText.replace(/\./g, '').replace(',', '.').trim();
+    // " 155,90 " gibi gelen metindeki boşlukları ve gizli karakterleri temizle
+    let temizFiyatMetni = hamFiyat.replace(/\s+/g, '').trim();
+
+    // "155,90" formatındaki Türkçe sayıyı, backend ve ESP32 formatı olan "155.90" haline getiriyoruz
+    // Binlik ayırıcı noktaları siler, ondalık virgülünü noktaya çevirir
+    let noktaFormatli = temizFiyatMetni.replace(/\./g, '').replace(',', '.');
     const fiyatFloat = parseFloat(noktaFormatli);
 
+    if (isNaN(fiyatFloat) || fiyatFloat === 0) {
+      return res.status(404).json({ hata: "Ayıklanan fiyat geçersiz bir sayıya dönüştü." });
+    }
+
+    // Türkiye saatine göre güncel tarih bilgisi
     const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
+    // ESP32'ye gidecek tertemiz ve doğrulanmış veri paketi
     res.status(200).json({
       sembol: "TERA",
       fiyat: fiyatFloat,
       tarih: tarihStr,
       debug: {
-        ayiklananMetin: fiyatText,
-        yontem: bulmaYontemi,
-        hedefUrl: url
+        tarayicidanOkunanHamMetin: hamFiyat,
+        temizlenmisMetin: temizFiyatMetni,
+        hedefSelector: ".finance-heading-new-bar .unit-price .data-value"
       }
     });
 
   } catch (error) {
     res.status(500).json({ 
-      hata: "Mynet hisse sayfasına bağlanırken ağ hatası oluştu.",
+      hata: "Mynet sunucusuna bağlanırken hata oluştu.",
       detay: error.message 
     });
   }

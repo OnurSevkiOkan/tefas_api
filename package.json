@@ -1,8 +1,9 @@
 {
   "name": "tefas-proxy-api",
-  "version": "1.0.1",
-  "description": "ESP32 için TEFAS JSON Proxy",
+  "version": "1.0.2",
+  "description": "ESP32 için TEFAS JSON Proxy - Bypass Sürümü",
   "dependencies": {
-    "@firstthumb/tefas-api": "^1.0.0"
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0"
   }
 }

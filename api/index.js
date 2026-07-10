@@ -5,52 +5,68 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  const url = 'https://www.tefas.gov.tr/tr/fon-detayli-analiz/TLY';
+  const parseFinans = (str) => {
+    if (!str) return 0;
+    let t = str.replace(/[^0-9.,]/g, '').trim();
+    if (t.includes(',') && t.includes('.')) t = t.replace(/\./g, '').replace(',', '.');
+    else if (t.includes(',')) t = t.replace(',', '.');
+    return parseFloat(t) || 0;
+  };
 
   try {
-    // TEFAS bot koruması için Referer başlığı ZORUNLUDUR
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Referer': 'https://www.tefas.gov.tr/'
-      },
-      timeout: 10000
-    });
+    // -------------------------------------------------------------
+    // KAYNAK 1: TERA PORTFÖY (Sadece Birim Fiyat İçin - Senin Tercihin)
+    // -------------------------------------------------------------
+    let fiyat = 0;
+    const teraRes = await axios.get('https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly', {
+        headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000
+    }).catch(() => null);
 
-    const $ = cheerio.load(response.data);
-    
-    // Verileri tablolardan/alanlardan çekiyoruz
-    const fiyatText = $('.fon-fiyat-bilgi .fon-fiyat').text().trim(); 
-    const buyuklukText = $('.fon-detay-bilgi').text(); // Büyüklük genelde bu bloktadır
-    
-    // Temizleme fonksiyonu
-    const parse = (str) => {
-        if (!str) return 0;
-        let t = str.replace(/[^0-9.,-]/g, '').replace(/\./g, '').replace(',', '.');
-        return parseFloat(t) || 0;
-    };
+    if (teraRes) {
+        const $t = cheerio.load(teraRes.data);
+        $t('script, style').remove();
+        const tMetin = $t('body').text().replace(/\s+/g, ' ');
+        // Tera'nın özel metin diziliminden fiyatı çekiyoruz
+        const fiyatMatch = tMetin.match(/Son Güncelleme Tarihi\s+([0-9.,]+)/i);
+        fiyat = fiyatMatch ? parseFinans(fiyatMatch[1]) : 0;
+    }
 
-    const fiyat = parse(fiyatText);
-    
-    // Büyüklük bilgisini metin bloğundan temizleyerek buluyoruz
+    // -------------------------------------------------------------
+    // KAYNAK 2: BIGPARA (Tera'da Olmayan Büyüklük ve Pay Sayısı İçin)
+    // -------------------------------------------------------------
     let fonBuyuklugu = 0;
-    const bMatch = buyuklukText.match(/(?:Fon Toplam Değer|Portföy Değeri)[\s\S]{0,50}?([0-9.,]+)/i);
-    if (bMatch) fonBuyuklugu = parse(bMatch[1]);
+    let toplamPay = 0;
+    const bpRes = await axios.get('https://bigpara.hurriyet.com.tr/fon/detay/TLY/', {
+        headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000
+    }).catch(() => null);
 
-    // TEFAS detay sayfasında nakit akışı verisi doğrudan yazmaz. 
-    // Ancak "Dolaşımdaki Pay" verisi varsa bunu ESP32 tarafında hesaplayabiliriz.
-    // Şimdilik 0 dönüyoruz, pay sayısını bulursak güncelleriz.
-    
+    if (bpRes) {
+        const $b = cheerio.load(bpRes.data);
+        $b('script, style').remove();
+        const bpMetin = $b('body').text().replace(/\s+/g, ' ');
+        
+        // Bigpara'nın standart finans tablolarından hacim verilerini çekiyoruz
+        const bMatch = bpMetin.match(/(?:Fon Toplam Değeri|Toplam Değer)[^0-9]*([0-9.,]+)/i);
+        const pMatch = bpMetin.match(/(?:Dolaşımdaki Pay|Pay Sayısı)[^0-9]*([0-9.,]+)/i);
+        
+        fonBuyuklugu = bMatch ? parseFinans(bMatch[1]) : 0;
+        toplamPay = pMatch ? parseFinans(pMatch[1]) : 0;
+    }
+
+    // Eğer kaynaklardan pay sayısı gelmez ama büyüklük gelirse, matematiksel ters mühendislik yap:
+    if (toplamPay === 0 && fonBuyuklugu > 0 && fiyat > 0) {
+        toplamPay = fonBuyuklugu / fiyat;
+    }
+
     res.status(200).json({
       fon: "TLY",
       fiyat: fiyat,
       fon_toplam_buyukluk_tl: fonBuyuklugu,
-      toplam_pay_sayisi: 0, 
-      direkt_net_nakit_akisi: 0,
-      tarih: new Date().toLocaleDateString('tr-TR')
+      toplam_pay_sayisi: Math.round(toplamPay),
+      tarih: new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' })
     });
 
   } catch (error) {
-    res.status(500).json({ hata: "TEFAS bağlantısı başarısız.", detay: error.message });
+    res.status(500).json({ hata: "Sunucu içi birleştirme hatası.", detay: error.message });
   }
 };

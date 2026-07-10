@@ -2,71 +2,120 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
+  // CORS ve JSON yanıt başlıkları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  const parseFinans = (str) => {
+  // Türkçe finansal sayıları standart float formatına (7277.90) getiren temizlik fonksiyonu
+  const parseFinansSayi = (str) => {
     if (!str) return 0;
-    let t = str.replace(/[^0-9.,]/g, '').trim();
-    if (t.includes(',') && t.includes('.')) t = t.replace(/\./g, '').replace(',', '.');
-    else if (t.includes(',')) t = t.replace(',', '.');
-    return parseFloat(t) || 0;
+    let temiz = str.toString().replace(/[^0-9.,-]/g, '').trim();
+    if (temiz.includes(',') && temiz.includes('.')) {
+      temiz = temiz.replace(/\./g, '').replace(',', '.');
+    } else if (temiz.includes(',')) {
+      temiz = temiz.replace(',', '.');
+    }
+    return parseFloat(temiz) || 0;
   };
 
+  // Next.js veri ağacında TLY fonuna ait nesneyi derinlemesine arayan fonksiyon
+  const findFundRecursively = (obj, targetCode) => {
+    if (!obj || typeof obj !== 'object') return null;
+    if (obj.code === targetCode || obj.kod === targetCode || obj.fund_code === targetCode) {
+      return obj;
+    }
+    for (const key in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, key)) {
+        const result = findFundRecursively(obj[key], targetCode);
+        if (result) return result;
+      }
+    }
+    return null;
+  };
+
+  let birimFiyat = 0;
+  let fonBuyuklugu = 0;
+  let toplamPay = 0;
+  let direktNetAkis = 0;
+
   try {
-    // -------------------------------------------------------------
-    // KAYNAK 1: TERA PORTFÖY (Sadece Birim Fiyat İçin - Senin Tercihin)
-    // -------------------------------------------------------------
-    let fiyat = 0;
-    const teraRes = await axios.get('https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly', {
-        headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000
+    // =================================================================
+    // 1. ADIM: TERA PORTFÖY'DEN BİRİM FİYATI ÇEKME
+    // =================================================================
+    const teraUrl = 'https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly';
+    const teraResponse = await axios.get(teraUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+      timeout: 5000
     }).catch(() => null);
 
-    if (teraRes) {
-        const $t = cheerio.load(teraRes.data);
-        $t('script, style').remove();
-        const tMetin = $t('body').text().replace(/\s+/g, ' ');
-        // Tera'nın özel metin diziliminden fiyatı çekiyoruz
-        const fiyatMatch = tMetin.match(/Son Güncelleme Tarihi\s+([0-9.,]+)/i);
-        fiyat = fiyatMatch ? parseFinans(fiyatMatch[1]) : 0;
+    if (teraResponse && teraResponse.data) {
+      const $t = cheerio.load(teraResponse.data);
+      $t('script, style, noscript').remove();
+      const teraMetin = $t('body').text().replace(/\s+/g, ' ');
+      
+      const fiyatMatch = teraMetin.match(/Son Güncelleme Tarihi\s+([0-9.,]+)/i) || teraMetin.match(/\b(\d+,\d{4,6})\b/);
+      if (fiyatMatch) {
+        birimFiyat = parseFinansSayi(fiyatMatch[1]);
+      }
     }
 
-    // -------------------------------------------------------------
-    // KAYNAK 2: BIGPARA (Tera'da Olmayan Büyüklük ve Pay Sayısı İçin)
-    // -------------------------------------------------------------
-    let fonBuyuklugu = 0;
-    let toplamPay = 0;
-    const bpRes = await axios.get('https://bigpara.hurriyet.com.tr/fon/detay/TLY/', {
-        headers: { 'User-Agent': 'Mozilla/5.0' }, timeout: 5000
+    // =================================================================
+    // 2. ADIM: FINTABLES'TAN GİRİŞ/ÇIKIŞ VE DETAYLARI ÇEKME
+    // =================================================================
+    const fintablesUrl = 'https://fintables.com/fonlar/nakit-giris-cikisi';
+    const fintablesResponse = await axios.get(fintablesUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      timeout: 6000
     }).catch(() => null);
 
-    if (bpRes) {
-        const $b = cheerio.load(bpRes.data);
-        $b('script, style').remove();
-        const bpMetin = $b('body').text().replace(/\s+/g, ' ');
-        
-        // Bigpara'nın standart finans tablolarından hacim verilerini çekiyoruz
-        const bMatch = bpMetin.match(/(?:Fon Toplam Değeri|Toplam Değer)[^0-9]*([0-9.,]+)/i);
-        const pMatch = bpMetin.match(/(?:Dolaşımdaki Pay|Pay Sayısı)[^0-9]*([0-9.,]+)/i);
-        
-        fonBuyuklugu = bMatch ? parseFinans(bMatch[1]) : 0;
-        toplamPay = pMatch ? parseFinans(pMatch[1]) : 0;
+    if (fintablesResponse && fintablesResponse.data) {
+      const $f = cheerio.load(fintablesResponse.data);
+      const nextDataHtml = $f('#__NEXT_DATA__').html();
+      
+      if (nextDataHtml) {
+        const nextData = JSON.parse(nextDataHtml);
+        const tlyTabloObjesi = findFundRecursively(nextData, 'TLY');
+
+        if (tlyTabloObjesi) {
+          // Eğer Tera Portföy sitesi anlık çökerse fiyata yedek olarak Fintables değerini ata
+          if (birimFiyat === 0) {
+            birimFiyat = parseFinansSayi(tlyTabloObjesi.price || tlyTabloObjesi.fiyat || 0);
+          }
+          
+          // Fintables Next.js veri alanındaki olası anahtar eşleşmeleri
+          fonBuyuklugu = parseFinansSayi(tlyTabloObjesi.market_cap || tlyTabloObjesi.total_value || tlyTabloObjesi.fon_toplam_buyukluk_tl || 0);
+          toplamPay = parseFinansSayi(tlyTabloObjesi.total_shares || tlyTabloObjesi.shares || tlyTabloObjesi.toplam_pay_sayisi || 0);
+          direktNetAkis = parseFinansSayi(tlyTabloObjesi.net_flow || tlyTabloObjesi.flow || tlyTabloObjesi.net_giris_cikislari || tlyTabloObjesi.amount || 0);
+        }
+      }
     }
 
-    // Eğer kaynaklardan pay sayısı gelmez ama büyüklük gelirse, matematiksel ters mühendislik yap:
-    if (toplamPay === 0 && fonBuyuklugu > 0 && fiyat > 0) {
-        toplamPay = fonBuyuklugu / fiyat;
+    // Her iki hattan da fiyat saptanamazsa güvenli hata mesajı fırlat
+    if (birimFiyat === 0) {
+      return res.status(200).json({
+        hata: "Tera Portföy ve Fintables kaynaklarından birim fiyat saptanamadı."
+      });
     }
 
+    const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
+
+    // ESP32 terminaline iletilecek konsolide veri paketi
     res.status(200).json({
       fon: "TLY",
-      fiyat: fiyat,
+      fiyat: birimFiyat,
       fon_toplam_buyukluk_tl: fonBuyuklugu,
       toplam_pay_sayisi: Math.round(toplamPay),
-      tarih: new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' })
+      direkt_net_nakit_akisi: direktNetAkis, // Fintables tablosundaki net giriş/çıkış miktarı (TL)
+      tarih: tarihStr
     });
 
   } catch (error) {
-    res.status(500).json({ hata: "Sunucu içi birleştirme hatası.", detay: error.message });
+    res.status(200).json({
+      hata: "Hibrit veri hatları birleştirilirken hata oluştu.",
+      detay: error.message
+    });
   }
 };

@@ -21,7 +21,7 @@ module.exports = async (req, res) => {
 
   try {
     // =================================================================
-    // 1. ADIM: TERA PORTFÖY (FİYAT MOTORU - DOKUNULMADI)
+    // 1. ADIM: TERA PORTFÖY (FİYAT MOTORU - DİREKT BAĞLANTI)
     // =================================================================
     const teraUrl = 'https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly';
     const teraResponse = await axios.get(teraUrl, {
@@ -41,25 +41,25 @@ module.exports = async (req, res) => {
     }
 
     // =================================================================
-    // 2. ADIM: FINTABLES (YENİ ZEKİ NAKİT AKIŞ TARAYICISI)
+    // 2. ADIM: FINTABLES (PROXY İLE IP ENGELİNİ AŞMA)
     // =================================================================
-    const fintablesUrl = 'https://fintables.com/fonlar/nakit-giris-cikisi';
-    const fintablesResponse = await axios.get(fintablesUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
-      },
-      timeout: 6000
+    // Fintables'a direkt gitmek yerine AllOrigins Proxy üzerinden geçiyoruz
+    const fintablesProxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent('https://fintables.com/fonlar/nakit-giris-cikisi')}`;
+    
+    const fintablesResponse = await axios.get(fintablesProxyUrl, {
+      timeout: 8000
     }).catch(() => null);
 
-    if (fintablesResponse && fintablesResponse.data) {
-      const $f = cheerio.load(fintablesResponse.data);
+    // AllOrigins proxy'si sitenin HTML kodlarını 'contents' adlı JSON anahtarında döndürür
+    if (fintablesResponse && fintablesResponse.data && fintablesResponse.data.contents) {
+      const rawHtml = fintablesResponse.data.contents;
+      const $f = cheerio.load(rawHtml);
       const nextDataHtml = $f('#__NEXT_DATA__').html();
       
       if (nextDataHtml) {
         const nextData = JSON.parse(nextDataHtml);
         
-        // TLY'yi ve bulunduğu üst klasörü (parent) bulacak tarayıcı
+        // JSON ağacında "TLY" fonunu alttan yukarıya tarayan zeki arama motoru
         let tlyRow = null;
         const searchNode = (node, parent) => {
           if (!node || typeof node !== 'object') return;
@@ -79,7 +79,6 @@ module.exports = async (req, res) => {
           const obj = tlyRow.parent || {};
           const cur = tlyRow.current || {};
           
-          // Net akış verisini "parent" (ebeveyn) klasörden bulan esnek fonksiyon
           const extractFlow = (targetObj) => {
             if (!targetObj) return 0;
             const priorityKeys = ['daily_flow', 'net_flow', 'flow', 'net_giris_cikis', 'diff'];
@@ -88,14 +87,13 @@ module.exports = async (req, res) => {
                   if (key.toLowerCase().includes(pk) && key.toLowerCase() !== 'total_value') {
                      const val = targetObj[key];
                      if (typeof val === 'number') return val;
-                     if (typeof val === 'string' && val.match(/[0-9]/)) return parseFinansSayi(val);
+                     if (typeof val === 'string' && val.match(/[0-9-]/)) return parseFinansSayi(val);
                   }
                }
             }
             return 0;
           };
 
-          // TLY kodunu bulduğumuz klasörün hem içine hem de bir üstüne bak
           direktNetAkis = extractFlow(obj) || extractFlow(cur) || 0;
         }
       }
@@ -116,7 +114,7 @@ module.exports = async (req, res) => {
 
   } catch (error) {
     res.status(200).json({
-      hata: "Veri isleme sirasinda hata olustu.",
+      hata: "Veri isleme sirasinda sunucu hatasi.",
       detay: error.message
     });
   }

@@ -2,75 +2,86 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
-  // CORS ve JSON başlıkları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
   const fonKodu = (req.query.fon || 'TLY').toUpperCase();
-  
-  // Bu sefer klasik ve sunucu taraflı (SSR) HTML basan Mynet Finans'ı hedefliyoruz
   const url = `https://finans.mynet.com/fon/${fonKodu}`;
 
   try {
     const response = await axios.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       },
-      timeout: 7000 // ESP32 zaman aşımına uğramasın diye 7 saniye limit
+      timeout: 7000
     });
 
     const html = response.data;
     const $ = cheerio.load(html);
 
     let fiyatText = '';
+    let eslesmeKaynagi = '';
 
-    // 1. Kademe: Mynet Finans'ın klasik fiyat sınıflarını tara
-    fiyatText = $('.fn-fiyat').text() || $('.seans-fiyat').text() || '';
+    // 1. Kademe: Doğrudan Mynet'in ana fiyat sınıflarını hedef alıyoruz
+    if ($('.fn-fiyat').length > 0) {
+      fiyatText = $('.fn-fiyat').first().text().trim();
+      eslesmeKaynagi = "DOM_Class_fn-fiyat";
+    } else if ($('.seans-fiyat').length > 0) {
+      fiyatText = $('.seans-fiyat').first().text().trim();
+      eslesmeKaynagi = "DOM_Class_seans-fiyat";
+    }
 
-    // 2. Kademe (Fallback): Eğer seçiciler ıskalarsa, HTML içinde "Son Fiyat" kelimesinin sağını solunu Regex ile tara
-    if (!fiyatText || fiyatText.trim() === '') {
+    // 2. Kademe (Fallback): Sınıflar boşsa, HTML içindeki "Son Fiyat" tablosunu Regex ile tara
+    if (!fiyatText) {
       const regexMatch = html.match(/(?:Fiyat|Son Fiyat)[\s\S]*?>\s*([0-9.,]+)\s*</i);
-      if (regexMatch) fiyatText = regexMatch[1];
+      if (regexMatch) {
+        fiyatText = regexMatch[1].trim();
+        eslesmeKaynagi = "Regex_Son_Fiyat";
+      }
     }
 
-    // 3. Kademe (Fallback): Sayfada yer alan fon fiyatı formatındaki (Örn: 3,4567) ilk saf sayıyı cımbızla çek
-    if (!fiyatText || fiyatText.trim() === '') {
-      const generalRegex = html.match(/>\s*([0-9]{1,3},[0-9]{4,6})\s*</);
-      if (generalRegex) fiyatText = generalRegex[1];
+    // Ayıklanan metni ham haliyle saklayalım (Debugger için)
+    const hamMetin = fiyatText;
+
+    if (!fiyatText) {
+      return res.status(404).json({ hata: "Sayfada fiyata dair hicbir metin bulunamadi." });
     }
 
-    // Gelişmiş Hata Ayıklama: Eğer hala bulunamadıysa, Cloudflare barajına mı takıldık anlamak için HTML özetini dön
-    if (!fiyatText || fiyatText.trim() === '') {
-      const htmlSnippet = html.substring(0, 400).replace(/\s+/g, ' ');
-      return res.status(404).json({ 
-        hata: "Mynet DOM yapisinda fiyat sablonu ayristirilamadi.",
-        SistemNotu: "Asagidaki veri eger Cloudflare iceriyorsa IP engellenmis demektir.",
-        htmlSnippet: htmlSnippet
-      });
+    // --- AKILLI SAYI FORMATLAMA ALGORİTMASI ---
+    // Eğer veride hem nokta hem virgül varsa (Örn: 2.048,15 -> İki bin kırk sekiz nokta on beş)
+    // Noktayı (binlik ayırıcıyı) sil, virgülü noktaya çevir.
+    let temizFiyat = fiyatText;
+    if (temizFiyat.includes(',') && temizFiyat.includes('.')) {
+      temizFiyat = temizFiyat.replace(/\./g, '').replace(',', '.');
+    } 
+    // Eğer sadece virgül varsa (Örn: 3,4567 -> Üç nokta kırk beş altmış yedi)
+    // Virgülü direkt noktaya çevir.
+    else if (temizFiyat.includes(',')) {
+      temizFiyat = temizFiyat.replace(',', '.');
     }
+    // Eğer sadece nokta varsa (Örn: 2.048) binlik mi yoksa ondalık mı ayırt etmek zor.
+    // Ancak fon fiyatları küsuratlı olduğu için bunu direkt ondalık (float) kabul ediyoruz, dokunmuyoruz.
 
-    // "3,4567" formatını ESP32'nin seveceği "3.4567" float formatına çeviriyoruz
-    let temizFiyat = fiyatText.replace(/\./g, '').replace(',', '.').trim();
     const fiyatFloat = parseFloat(temizFiyat);
 
-    if (isNaN(fiyatFloat) || fiyatFloat === 0) {
-      return res.status(404).json({ hata: "Ayristirilan fiyat gecersiz bir sayısal degere sahip." });
-    }
-
-    // Türkiye saatine göre güncel tarih oluştur
     const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
 
-    // ESP32 ve Telegram'ın beklediği kusursuz çıktı
+    // ESP32'nin kafası karışmasın ama biz tarayıcıdan bakınca her şeyi görelim diye genişletilmiş çıktı:
     res.status(200).json({
       fon: fonKodu,
       fiyat: fiyatFloat,
-      tarih: tarihStr
+      tarih: tarihStr,
+      // Hata ayıklama (Debug) parametreleri:
+      debug: {
+        yakalananHamMetin: hamMetin,
+        formatlanmisMetin: temizFiyat,
+        verininAlindigiYer: eslesmeKaynagi
+      }
     });
 
   } catch (error) {
     res.status(500).json({ 
-      hata: "Mynet sunucusuna erisim saglanirken ağ hatasi olustu.",
+      hata: "Ağ veya sunucu hatası oluştu.",
       detay: error.message 
     });
   }

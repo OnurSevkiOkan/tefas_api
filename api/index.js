@@ -2,11 +2,12 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
-  // CORS ve JSON yanıt başlıkları
+  // CORS ve JSON başlık tanımlamaları
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Content-Type', 'application/json');
 
-  const fonKodu = (req.query.fon || 'TLY').toUpperCase();
+  // Doğrudan verdiğin resmi Tera Portföy TLY fon sayfasını hedefliyoruz
+  const url = 'https://www.teraportfoy.com/fonlarimiz/serbest-fonlarimiz/tera-portfoy-birinci-serbest-fon-tly';
 
   // Türkçe finansal sayı formatını standart float tipine çeviren temizlik fonksiyonu
   const parseFinansSayi = (str) => {
@@ -20,85 +21,85 @@ module.exports = async (req, res) => {
     return parseFloat(temiz) || 0;
   };
 
-  // =================================================================
-  // 1. HAT: BLOOMBERG HT (Düzeltilmiş Nokta Atışı URL Hattı)
-  // =================================================================
   try {
-    const bhtUrl = `https://www.bloomberght.com/fon/${fonKodu}`;
-    const response = await axios.get(bhtUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 4000
+    // 1. ADIM: Tera Portföy Resmi Sitesine İstek Atma
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'tr-TR,tr;q=0.9'
+      },
+      timeout: 8000
     });
 
-    if (response && response.data) {
-      const $ = cheerio.load(response.data);
-      $('script, style, noscript, iframe').remove();
-      const text = $('body').text().replace(/\s+/g, ' ');
+    const html = response.data;
+    const $ = cheerio.load(html);
 
-      // Syntax hatası ihtimali sıfır olan güvenli finansal Regex kalıpları
-      const fiyatMatch = text.match(/Son Fiyat[^0-9]*([0-9.,]+)/i);
-      const buyuklukMatch = text.match(/(?:Fon Toplam Değeri|Büyüklük)[^0-9]*([0-9.,]+)/i);
-      const payMatch = text.match(/(?:Dolaşımdaki Pay|Pay Sayısı)[^0-9]*([0-9.,]+)/i);
+    // Kod kalabalığını temizle
+    $('script, style, noscript, iframe, footer, nav, header').remove();
+    const safMetin = $('body').text().replace(/\s+/g, ' ');
 
-      const fiyat = parseFinansSayi(fiyatMatch ? fiyatMatch[1] : null);
-      
-      if (fiyat > 0) {
-        return res.status(200).json({
-          fon: fonKodu,
-          fiyat: fiyat,
-          fon_toplam_buyukluk_tl: parseFinansSayi(buyuklukMatch ? buyuklukMatch[1] : null),
-          toplam_pay_sayisi: Math.round(parseFinansSayi(payMatch ? payMatch[1] : null)),
-          tarih: new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' }),
-          kaynak: "Bloomberg HT"
-        });
+    // --- RESMİ SİTE REGEX SÜZGEÇLERİ ---
+    // Kurumsal fon sitelerinin standart veri başlıklarını (Birim Değer, Büyüklük, Pay Sayısı) tarıyoruz
+    const fiyatMatch = safMetin.match(/(?:Fiyat|Birim Pay Değeri|Birim Fiyat)[^0-9]*([0-9]+,[0-9]{4,6}|[0-9]+\.[0-9]{4,6})/i);
+    const buyuklukMatch = safMetin.match(/(?:Toplam Değer|Büyüklük|Portföy Büyüklüğü|Fon Toplam Değeri)[^0-9]*([0-9.,]+)/i);
+    const payMatch = safMetin.match(/(?:Pay Sayısı|Dolaşımdaki Pay|Toplam Pay)[^0-9]*([0-9.,]+)/i);
+
+    let fiyat = fiyatMatch ? parseFinansSayi(fiyatMatch[1]) : 0;
+    let fonBuyuklugu = buyuklukMatch ? parseFinansSayi(buyuklukMatch[1]) : 0;
+    let toplamPay = payMatch ? parseFinansSayi(payMatch[1]) : 0;
+    let kaynakBelirteci = "Tera Portföy Resmi Sitesi";
+
+    // --- FAIL-OVER (EMNİYET ŞERİDİ) ---
+    // Eğer kurumsal site o gün bakımdaysa veya bulut IP'sini engellediyse cihaz kör kalmasın:
+    if (fiyat === 0) {
+      const bhtUrl = `https://www.bloomberght.com/fon/TLY`;
+      const bhtResponse = await axios.get(bhtUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        timeout: 5000
+      }).catch(() => null);
+
+      if (bhtResponse && bhtResponse.data) {
+        const $bht = cheerio.load(bhtResponse.data);
+        $bht('script, style, noscript').remove();
+        const bhtMetin = $bht('body').text().replace(/\s+/g, ' ');
+
+        const bhtFiyatMatch = bhtMetin.match(/Son Fiyat[^0-9]*([0-9.,]+)/i);
+        const bhtBuyuklukMatch = bhtMetin.match(/(?:Fon Toplam Değeri|Büyüklük)[^0-9]*([0-9.,]+)/i);
+        const bhtPayMatch = bhtMetin.match(/(?:Dolaşımdaki Pay|Pay Sayısı)[^0-9]*([0-9.,]+)/i);
+
+        fiyat = parseFinansSayi(bhtFiyatMatch ? bhtFiyatMatch[1] : null);
+        fonBuyuklugu = parseFinansSayi(bhtBuyuklukMatch ? bhtBuyuklukMatch[1] : null);
+        toplamPay = parseFinansSayi(bhtPayMatch ? bhtPayMatch[1] : null);
+        kaynakBelirteci = "Emniyet Şeridi (Bloomberg HT)";
       }
     }
-  } catch (e) {
-    // 1. Hat çökerse log bas ve 2. hatta güvenle geçmesi için akışı serbest bırak
-    console.log("Bloomberg HT Hattı devre dışı kaldı:", e.message);
-  }
 
-  // =================================================================
-  // 2. HAT: BIGPARA HÜRRİYET (Garantili Klasik SSR Hattı)
-  // =================================================================
-  try {
-    const bigparaUrl = `https://bigpara.hurriyet.com.tr/fon/detay/${fonKodu}/`;
-    const response = await axios.get(bigparaUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-      timeout: 4000
+    if (!fiyat || fiyat === 0) {
+      return res.status(404).json({
+        hata: "Resmi kaynak ve emniyet hattı üzerinden TLY fon fiyatı soyutlanamadı.",
+        sayfaMetinOzeti: safMetin.substring(0, 300)
+      });
+    }
+
+    const tarihStr = new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' });
+
+    // ESP32 terminalinin beklediği kusursuz JSON paketi
+    res.status(200).json({
+      fon: "TLY",
+      fiyat: fiyat,
+      fon_toplam_buyukluk_tl: fonBuyuklugu,
+      toplam_pay_sayisi: Math.round(toplamPay),
+      tarih: tarihStr,
+      bilgi: {
+        aktifKaynak: kaynakBelirteci
+      }
     });
 
-    if (response && response.data) {
-      const $ = cheerio.load(response.data);
-      $('script, style, noscript, iframe').remove();
-      const text = $('body').text().replace(/\s+/g, ' ');
-
-      const fiyatMatch = text.match(/(?:Son Fiyat|Fiyat)[^0-9]*([0-9.,]+)/i);
-      const buyuklukMatch = text.match(/(?:Fon Toplam Değeri|Büyüklük|Toplam Değer)[^0-9]*([0-9.,]+)/i);
-      const payMatch = text.match(/(?:Dolaşımdaki Pay|Pay Sayısı)[^0-9]*([0-9.,]+)/i);
-
-      const fiyat = parseFinansSayi(fiyatMatch ? fiyatMatch[1] : null);
-      
-      if (fiyat > 0) {
-        return res.status(200).json({
-          fon: fonKodu,
-          fiyat: fiyat,
-          fon_toplam_buyukluk_tl: parseFinansSayi(buyuklukMatch ? buyuklukMatch[1] : null),
-          toplam_pay_sayisi: Math.round(parseFinansSayi(payMatch ? payMatch[1] : null)),
-          tarih: new Date().toLocaleDateString('tr-TR', { timeZone: 'Europe/Istanbul' }),
-          kaynak: "Bigpara Hürriyet"
-        });
-      }
-    }
-  } catch (e) {
-    console.log("Bigpara Hattı devre dışı kaldı:", e.message);
+  } catch (error) {
+    res.status(500).json({
+      hata: "Sunucu içi kritik işlem hatası.",
+      detay: error.message
+    });
   }
-
-  // =================================================================
-  // NİHAİ ÇIKIŞ: İki hat da havlu atarsa ESP32'ye kontrollü hata dön
-  // =================================================================
-  return res.status(404).json({
-    hata: "Tüm bağımsız finans hatları (Bloomberg HT & Bigpara) tarandı ancak fon verisi soyutlanamadı.",
-    durum: "Kaynak sitelerde geçici bakım veya IP engellemesi mevcut olabilir."
-  });
 };

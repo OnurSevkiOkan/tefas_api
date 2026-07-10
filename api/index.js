@@ -6,7 +6,7 @@ module.exports = async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
 
   const fonKodu = (req.query.fon || 'TLY').toUpperCase();
-  const url = `https://finans.mynet.com/fon/${fonKodu}`;
+  const url = `https://finans.mynet.com/borsa/hisseler/tera-tera-yatirim-menkul-degerler/`;
 
   try {
     const response = await axios.get(url, {
